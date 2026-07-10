@@ -1,9 +1,12 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import type { CancellationToken, LanguageModelChatInformation } from 'vscode';
 import { GatewayClient } from '../api/client';
+import { OpenAIModel } from '../api/types';
 import { GatewayConfig } from '../config/gatewayConfig';
 import { TOKEN_CONSTANTS } from '../chat/tokenBudget';
 import { parseContextOverflowError, resolveContextWindowOverride } from '../chat/contextWindow';
-import { dedupeModels } from '../models/modelDisplay';
+import { dedupeModels, friendlyModelName } from '../models/modelDisplay';
 import { buildModelInfo } from '../models/modelInfoBuilder';
 
 interface ModelCatalogDeps {
@@ -12,6 +15,7 @@ interface ModelCatalogDeps {
   log: (message: string) => void;
   /** Fired when connection state / cached data changes (status dialog refresh). */
   onStatusChanged: () => void;
+  getGlobalStoragePath?: () => string | undefined;
 }
 
 /**
@@ -47,6 +51,7 @@ export class ModelCatalog {
    * on config reload since the server (or its presets) may have changed.
    */
   private readonly learnedContextByModelId: Map<string, number> = new Map();
+  private readonly originalModelIdMap: Map<string, string> = new Map();
   private lastSuccessfulFetchAt?: number;
   private lastConnectionError?: string;
 
@@ -55,6 +60,10 @@ export class ModelCatalog {
   /** Most recent successful fetch result, or empty when none is cached. */
   public getCachedModels(): LanguageModelChatInformation[] {
     return this.fetchLast?.result ?? [];
+  }
+
+  public getRealModelId(modelId: string): string {
+    return this.originalModelIdMap.get(modelId) ?? modelId;
   }
 
   public getContextForModel(modelId: string): number | undefined {
@@ -131,38 +140,78 @@ export class ModelCatalog {
     token: CancellationToken
   ): Promise<LanguageModelChatInformation[]> {
     const { log } = this.deps;
+    const config = this.deps.getConfig();
     log('Fetching models from inference server...');
-    let response;
+
+    const customModelsPromise = this.loadChatLanguageModelsJson();
+    const serverModelsPromise = this.deps.client.fetchModels(token);
+
+    let rawModels: OpenAIModel[] = [];
     try {
-      response = await this.deps.client.fetchModels(token);
+      const response = await serverModelsPromise;
+      rawModels = response.data;
+      this.lastConnectionError = undefined;
     } catch (error) {
+      const customModels = await customModelsPromise;
       const errorMessage = error instanceof Error ? error.message : String(error);
       log(`ERROR: Failed to fetch models: ${errorMessage}`);
-      throw error;
+      this.lastConnectionError = errorMessage;
+      if (customModels.length > 0) {
+        log('Using configured/auto custom models as fallback.');
+      } else {
+        throw error;
+      }
     }
 
     if (token.isCancellationRequested) {
       return [];
     }
 
-    const uniqueModels = dedupeModels(response.data);
-    if (uniqueModels.length !== response.data.length) {
-      log(
-        `Server returned ${response.data.length} models, ${uniqueModels.length} unique after dedupe`
-      );
+    const customModels = await customModelsPromise;
+    const existingIds = new Set(rawModels.map((m) => m.id));
+    const combinedModels = [...rawModels];
+    for (const custom of customModels) {
+      if (!existingIds.has(custom.id)) {
+        combinedModels.push(custom);
+        existingIds.add(custom.id);
+      }
     }
 
-    // Rebuild the per-id context map from the latest fetch. If the server
+    // Rebuild the per-id context map and ID mapping from the latest fetch. If the server
     // removed a model, drop its entry so stale data can't leak into future
     // chat requests.
     this.contextByModelId.clear();
+    this.originalModelIdMap.clear();
 
-    const config = this.deps.getConfig();
+    const registeredModels: OpenAIModel[] = [];
+    for (const model of combinedModels) {
+      const originalId = model.id;
+      // Rename 'diffusion' prefix to 'diff' to comply with VS Code model-id restrictions; see issue #55.
+      const registeredId = originalId.replace(/diffusion/gi, 'diff');
+      
+      if (!this.originalModelIdMap.has(registeredId)) {
+        this.originalModelIdMap.set(registeredId, originalId);
+        registeredModels.push({ ...model, id: registeredId });
+      } else {
+        log(`Skipping duplicate registered ID: ${registeredId} (original: ${originalId})`);
+      }
+    }
+
+    const uniqueModels = dedupeModels(registeredModels);
+    if (uniqueModels.length !== registeredModels.length) {
+      log(
+        `Merged list has ${registeredModels.length} models, ${uniqueModels.length} unique after dedupe`
+      );
+    }
+
     const models = uniqueModels.map((model) => {
+      const registeredId = model.id;
+      const originalId = this.getRealModelId(registeredId);
       const contextOverride = resolveContextWindowOverride(
-        model.id,
+        originalId,
         config.modelContextWindows
       );
+
       const { info, totalContext, hasServerReportedContext } = buildModelInfo({
         model,
         defaultMaxTokens: config.defaultMaxTokens,
@@ -173,19 +222,28 @@ export class ModelCatalog {
         },
         contextOverride,
       });
-      this.contextByModelId.set(model.id, totalContext);
+
+      if (originalId !== registeredId) {
+        const friendlyName = friendlyModelName(originalId);
+        Object.assign(info, {
+          name: friendlyName,
+          version: friendlyName,
+        });
+      }
+
+      this.contextByModelId.set(registeredId, totalContext);
 
       if (contextOverride !== undefined) {
         log(
-          `  Model ${model.id}: context ${totalContext} tokens from 'modelContextWindows' setting (exposed as input=${info.maxInputTokens}, output=${info.maxOutputTokens})`
+          `  Model ${registeredId}: context ${totalContext} tokens from 'modelContextWindows' setting (exposed as input=${info.maxInputTokens}, output=${info.maxOutputTokens})`
         );
       } else if (hasServerReportedContext) {
         log(
-          `  Model ${model.id}: server-reported context ${totalContext} tokens (exposed as input=${info.maxInputTokens}, output=${info.maxOutputTokens})`
+          `  Model ${registeredId}: server-reported context ${totalContext} tokens (exposed as input=${info.maxInputTokens}, output=${info.maxOutputTokens})`
         );
       } else {
         log(
-          `  Model ${model.id}: no server-reported context; using defaultMaxTokens=${totalContext}. If this is wrong, set 'github.copilot.llm-gateway.modelContextWindows'.`
+          `  Model ${registeredId}: no server-reported context; using defaultMaxTokens=${totalContext}. If this is wrong, set 'github.copilot.llm-gateway.modelContextWindows'.`
         );
       }
 
@@ -252,5 +310,69 @@ export class ModelCatalog {
         `Add it to 'github.copilot.llm-gateway.modelContextWindows' to persist across sessions.`
     );
     return true;
+  }
+
+  private async loadChatLanguageModelsJson(): Promise<OpenAIModel[]> {
+    const { log, getGlobalStoragePath } = this.deps;
+    if (!getGlobalStoragePath) {
+      return [];
+    }
+    const globalStoragePath = getGlobalStoragePath();
+    if (!globalStoragePath) {
+      return [];
+    }
+    try {
+      const parent = path.dirname(globalStoragePath);
+      const userDir = path.dirname(parent);
+      if (userDir === parent || userDir === globalStoragePath) {
+        return [];
+      }
+      const filePath = path.join(userDir, 'chatLanguageModels.json');
+
+      let fileContent: string;
+      try {
+        fileContent = await fs.promises.readFile(filePath, 'utf8');
+      } catch (err: any) {
+        if (err.code === 'ENOENT') {
+          return [];
+        }
+        throw err;
+      }
+
+      const parsed = JSON.parse(fileContent);
+      if (!Array.isArray(parsed)) {
+        return [];
+      }
+
+      const models: OpenAIModel[] = [];
+      for (const provider of parsed) {
+        if (provider && typeof provider === 'object' && Array.isArray(provider.models)) {
+          for (const model of provider.models) {
+            if (model && typeof model === 'object' && typeof model.id === 'string') {
+              models.push({
+                id: model.id,
+                object: 'model',
+                created: Math.floor(Date.now() / 1000),
+                owned_by: typeof model.owned_by === 'string' ? model.owned_by : 'custom-endpoint',
+                ...(typeof model.maxInputTokens === 'number' ? { context_window: model.maxInputTokens } : {}),
+                ...(typeof model.context_length === 'number' ? { context_length: model.context_length } : {}),
+                ...(typeof model.max_model_len === 'number' ? { max_model_len: model.max_model_len } : {}),
+              });
+            }
+          }
+        }
+      }
+      if (models.length > 0) {
+        log(
+          `Loaded ${models.length} models from chatLanguageModels.json: ${models.map((m) => m.id).join(', ')}`
+        );
+      }
+      return models;
+    } catch (error) {
+      log(
+        `WARNING: Failed to read/parse chatLanguageModels.json: ${error instanceof Error ? error.message : String(error)}`
+      );
+      return [];
+    }
   }
 }

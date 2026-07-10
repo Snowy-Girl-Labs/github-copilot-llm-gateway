@@ -16,6 +16,7 @@ interface InlineCompletionServiceDeps {
   getConfig: () => GatewayConfig;
   /** Fallback model id when `inlineCompletionModel` isn't set — first model from the latest fetch. */
   getDefaultModelId: () => string | undefined;
+  getRealModelId?: (modelId: string) => string;
   log: (message: string) => void;
 }
 
@@ -72,8 +73,9 @@ export class InlineCompletionService {
       return undefined;
     }
 
+    const realModel = this.deps.getRealModelId ? this.deps.getRealModelId(model) : model;
     const request = buildCompletionRequestBody({
-      model,
+      model: realModel,
       context,
       maxTokens: config.inlineCompletionMaxTokens,
       includeSuffix: !this.suffixUnsupported,
@@ -95,7 +97,7 @@ export class InlineCompletionService {
         try {
           return await this.fetchCompletionText(
             buildCompletionRequestBody({
-              model,
+              model: realModel,
               context,
               maxTokens: config.inlineCompletionMaxTokens,
               includeSuffix: false,

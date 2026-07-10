@@ -188,7 +188,7 @@ export class ChatRequestHandler {
       const temperature = hasTools ? config.agentTemperature : DEFAULT_TEMPERATURE;
 
       const requestOptions = buildChatRequest({
-        model: model.id,
+        model: catalog.getRealModelId(model.id),
         messages: truncatedMessages,
         maxTokens: safeMaxOutputTokens,
         temperature,
