@@ -21,7 +21,11 @@ export interface ChatRequestOptions {
   tools?: OpenAIToolDefinition[];
   toolChoice?: ToolChoice;
   parallelToolCalls?: boolean;
-  /** Free-form overrides merged in last (e.g. from VS Code modelOptions). */
+  /**
+   * Free-form overrides merged in last (e.g. from VS Code modelOptions).
+   * Keys starting with an underscore (`_`) are reserved for internal/telemetry
+   * contexts and will be stripped before forwarding to the server.
+   */
   extraOptions?: Record<string, unknown>;
 }
 
@@ -48,11 +52,13 @@ export function buildChatRequest(options: ChatRequestOptions): OpenAIChatComplet
   }
 
   if (options.extraOptions) {
-        for (const [key, value] of Object.entries(options.extraOptions)) {
-          if (!key.startsWith('_')) {
-            (request as any)[key] = value;
-          }
-        
+    const protectedFields = new Set(['model', 'messages', 'tools']);
+    for (const [key, value] of Object.entries(options.extraOptions)) {
+      if (!key.startsWith('_')) {
+        if (!protectedFields.has(key) || !(key in request)) {
+          request[key] = value;
+        }
+      }
     }
   }
 
