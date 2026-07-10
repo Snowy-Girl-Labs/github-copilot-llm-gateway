@@ -48,8 +48,9 @@ export function buildChatRequest(options: ChatRequestOptions): OpenAIChatComplet
   }
 
   if (options.extraOptions) {
+    const protectedFields = new Set(['model', 'messages', 'tools']);
     for (const [key, value] of Object.entries(options.extraOptions)) {
-      if (!key.startsWith('_')) {
+      if (!key.startsWith('_') && !protectedFields.has(key)) {
         (request as any)[key] = value;
       }
     }
