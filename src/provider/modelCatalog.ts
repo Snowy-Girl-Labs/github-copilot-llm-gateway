@@ -185,11 +185,9 @@ export class ModelCatalog {
 
     const models = uniqueModels.map((model) => {
       const originalId = model.id;
-      let registeredId = model.id;
-      {// Rename 'diffusion' prefix to 'diff' to comply with VS Code model-id restrictions; see issue #55.
-        registeredId = originalId.replace(/diffusion/gi, 'diff');
-        this.originalModelIdMap.set(registeredId, originalId);
-      }
+      // Rename 'diffusion' prefix to 'diff' to comply with VS Code model-id restrictions; see issue #55.
+      const registeredId = originalId.replace(/diffusion/gi, 'diff');
+      this.originalModelIdMap.set(registeredId, originalId);
 
       const contextOverride = resolveContextWindowOverride(
         originalId,
