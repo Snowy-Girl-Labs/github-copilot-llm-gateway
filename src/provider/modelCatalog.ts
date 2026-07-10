@@ -101,11 +101,11 @@ export class ModelCatalog {
     const now = Date.now();
     const cacheTtlMs = 1000;
     if (this.fetchLast && now - this.fetchLast.at < cacheTtlMs) {
-      return { models: this.fetchLast.result };
+      return { models: this.fetchLast.result, error: this.lastConnectionError };
     }
     if (this.fetchInFlight) {
       try {
-        return { models: await this.fetchInFlight };
+        return { models: await this.fetchInFlight, error: this.lastConnectionError };
       } catch (error) {
         return { models: [], error: error instanceof Error ? error.message : String(error) };
       }
@@ -120,10 +120,9 @@ export class ModelCatalog {
       if (!token.isCancellationRequested) {
         this.fetchLast = { at: Date.now(), result };
         this.lastSuccessfulFetchAt = Date.now();
-        this.lastConnectionError = undefined;
         this.deps.onStatusChanged();
       }
-      return { models: result };
+      return { models: result, error: this.lastConnectionError };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.lastConnectionError = message;
@@ -354,6 +353,8 @@ export class ModelCatalog {
                 object: 'model',
                 created: Math.floor(Date.now() / 1000),
                 owned_by: typeof model.owned_by === 'string' ? model.owned_by : 'custom-endpoint',
+                // Map VS Code's maxInputTokens (representing the model's total context limit exposed to extension developers)
+                // to context_window on the OpenAI model shape, so that our token budgeting calculates constraints accurately.
                 ...(typeof model.maxInputTokens === 'number' ? { context_window: model.maxInputTokens } : {}),
                 ...(typeof model.context_length === 'number' ? { context_length: model.context_length } : {}),
                 ...(typeof model.max_model_len === 'number' ? { max_model_len: model.max_model_len } : {}),
