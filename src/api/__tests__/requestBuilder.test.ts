@@ -137,4 +137,24 @@ describe('buildChatRequest', () => {
     assert.equal((req as any)._telemetryTurn, undefined);
     assert.equal((req as any)._capturingTokenCorrelationId, undefined);
   });
+
+  test('extraOptions cannot override protected fields model, messages, tools', () => {
+    const req = buildChatRequest({
+      model: 'm',
+      messages: [{ role: 'user', content: 'hello' }],
+      maxTokens: 10,
+      temperature: 0.5,
+      tools: [{ type: 'function', function: { name: 'f' } }],
+      extraOptions: {
+        model: 'malicious-model',
+        messages: [{ role: 'user', content: 'injected message' }],
+        tools: [{ type: 'function', function: { name: 'injected-function' } }],
+        custom_field: 'allowed',
+      },
+    });
+    assert.equal(req.model, 'm');
+    assert.deepEqual(req.messages, [{ role: 'user', content: 'hello' }]);
+    assert.deepEqual(req.tools, [{ type: 'function', function: { name: 'f' } }]);
+    assert.equal((req as any).custom_field, 'allowed');
+  });
 });
