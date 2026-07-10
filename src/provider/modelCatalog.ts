@@ -119,7 +119,7 @@ export class ModelCatalog {
       // should re-probe instead of seeing a stale empty list.
       if (!token.isCancellationRequested) {
         this.fetchLast = { at: Date.now(), result };
-        this.lastSuccessfulFetchAt = Date.now();
+        this.lastConnectionError = undefined;
         this.deps.onStatusChanged();
       }
       return { models: result, error: this.lastConnectionError };
@@ -222,15 +222,7 @@ export class ModelCatalog {
         contextOverride,
       });
 
-      if (originalId !== registeredId) {
-        const friendlyName = friendlyModelName(originalId);
-        Object.assign(info, {
-          name: friendlyName,
-          version: friendlyName,
-        });
-      }
-
-      this.contextByModelId.set(registeredId, totalContext);
+      const contextOverride = resolveContextWindowOverride(registeredId, config.modelContextWindows);
 
       if (contextOverride !== undefined) {
         log(
